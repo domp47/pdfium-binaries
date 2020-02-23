@@ -1,0 +1,173 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index ae8918aeb..4d4f91c13 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -17,10 +17,14 @@ group("freetype_common") {
+ config("pdfium_common_config") {
+   cflags = []
+   ldflags = []
+-  include_dirs = [ "." ]
++  include_dirs = [
++    ".",
++    "v8/include"
++  ]
+   defines = [
+     "PNG_PREFIX",
+     "PNG_USE_READ_MACROS",
++    "FPDFSDK_EXPORTS"
+   ]
+ 
+   if (!use_system_libopenjpeg2) {
+diff --git a/fpdfsdk/cpdfsdk_renderpage.cpp b/fpdfsdk/cpdfsdk_renderpage.cpp
+index ce492e6fe..259be05a9 100644
+--- a/fpdfsdk/cpdfsdk_renderpage.cpp
++++ b/fpdfsdk/cpdfsdk_renderpage.cpp
+@@ -64,7 +64,7 @@ void RenderPageImpl(CPDF_PageRenderContext* pContext,
+     bool bPrinting =
+         pContext->m_pDevice->GetDeviceType() != DeviceType::kDisplay;
+     pList->DisplayAnnots(pPage, pContext->m_pContext.get(), bPrinting, &matrix,
+-                         false, nullptr);
++                         true, nullptr);
+   }
+ 
+   pContext->m_pRenderer = pdfium::MakeUnique<CPDF_ProgressiveRenderer>(
+diff --git a/fpdfsdk/fpdf_view.cpp b/fpdfsdk/fpdf_view.cpp
+index da2530877..e5ccdc7d4 100644
+--- a/fpdfsdk/fpdf_view.cpp
++++ b/fpdfsdk/fpdf_view.cpp
+@@ -51,6 +51,11 @@
+ #include "fxbarcode/BC_Library.h"
+ #endif  // PDF_ENABLE_XFA
+ 
++#if PDF_ENABLE_V8
++#include "v8/include/v8.h"
++#include "v8/include/libplatform/libplatform.h"
++#endif // PDF_ENABLE_V8
++
+ #if defined(OS_WIN)
+ #include "core/fpdfapi/render/cpdf_progressiverenderer.h"
+ #include "core/fpdfapi/render/cpdf_windowsrenderdevice.h"
+@@ -1149,3 +1154,71 @@ FPDF_EXPORT FPDF_DEST FPDF_CALLCONV FPDF_GetNamedDest(FPDF_DOCUMENT document,
+   }
+   return FPDFDestFromCPDFArray(pDestObj->AsArray());
+ }
++
++RefCounter::RefCounter(){
++		::InitializeCriticalSection(&cs);
++		refCount = 0;
++#if PDF_ENABLE_V8
++		platform = NULL;
++#endif // PDF_ENABLE_V8
++	}
++
++	RefCounter::~RefCounter(){
++		::DeleteCriticalSection(&cs);
++	}
++
++	void RefCounter::Enter(){
++		::EnterCriticalSection(&cs);
++	}
++
++	void RefCounter::Leave(){
++		::LeaveCriticalSection(&cs);
++	}
++
++	void RefCounter::AddRef(){
++		::EnterCriticalSection(&cs);
++
++		if (refCount == 0)
++		{
++#if PDF_ENABLE_V8
++			v8::V8::InitializeICU();
++			platform = v8::platform::NewDefaultPlatform();
++			v8::V8::InitializePlatform(platform.get());
++			v8::V8::Initialize();
++#endif // PDF_ENABLE_V8
++
++			FPDF_InitLibrary();
++		}
++
++		refCount++;
++
++		::LeaveCriticalSection(&cs);
++	}
++
++	void RefCounter::Release(){
++		::EnterCriticalSection(&cs);
++
++		refCount--;
++
++		if (refCount == 0)
++		{
++			FPDF_DestroyLibrary();
++#if PDF_ENABLE_V8
++			v8::V8::ShutdownPlatform();
++			// delete platform;
++      platform.reset();
++#endif // PDF_ENABLE_V8
++		}
++
++		::LeaveCriticalSection(&cs);
++	}
++
++FPDF_EXPORT void FPDF_CALLCONV FPDF_AddRef()
++{
++	refCounter.AddRef();
++}
++
++FPDF_EXPORT void FPDF_CALLCONV FPDF_Release()
++{
++	refCounter.Release();
++}
+\ No newline at end of file
+diff --git a/public/fpdfview.h b/public/fpdfview.h
+index 222ccd8c4..4adc4a921 100644
+--- a/public/fpdfview.h
++++ b/public/fpdfview.h
+@@ -18,6 +18,9 @@
+ #include <windows.h>
+ #endif
+ 
++#include "v8/include/v8.h"
++#include "v8/include/libplatform/libplatform.h"
++
+ #ifdef PDF_ENABLE_XFA
+ // PDF_USE_XFA is set in confirmation that this version of PDFium can support
+ // XFA forms as requested by the PDF_ENABLE_XFA setting.
+@@ -195,6 +198,25 @@ typedef int FPDF_OBJECT_TYPE;
+ #define FPDF_CALLCONV
+ #endif
+ 
++class RefCounter
++{
++private:
++	CRITICAL_SECTION cs;
++	int refCount;
++#if PDF_ENABLE_V8
++	std::unique_ptr<v8::Platform> platform;
++#endif // PDF_ENABLE_V8
++
++public:
++	RefCounter();
++	~RefCounter();
++
++	void Enter();
++	void Leave();
++	void AddRef();
++	void Release();
++};
++
+ // Exported Functions
+ #ifdef __cplusplus
+ extern "C" {
+@@ -1263,6 +1285,10 @@ FPDF_EXPORT FPDF_RESULT FPDF_CALLCONV FPDF_BStr_Set(FPDF_BSTR* bstr,
+ FPDF_EXPORT FPDF_RESULT FPDF_CALLCONV FPDF_BStr_Clear(FPDF_BSTR* bstr);
+ #endif  // PDF_ENABLE_XFA
+ 
++static RefCounter refCounter;
++FPDF_EXPORT void __stdcall FPDF_AddRef();
++FPDF_EXPORT void __stdcall FPDF_Release();
++
+ #ifdef __cplusplus
+ }
+ #endif
